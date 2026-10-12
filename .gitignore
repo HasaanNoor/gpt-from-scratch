@@ -1,0 +1,23 @@
+*
+
+# allow git configuration
+!.gitignore
+
+#allow only these two directories
+!from_scratch/
+!my_implementation/
+
+#allow their contents
+!from_scratch/**
+!my_implementation/**
+
+#ignore pycache files everywhere
+__pycache__/
+*.pyc
+.pytest_cache/
+
+.vscode/
+
+.DS_Store
+
+

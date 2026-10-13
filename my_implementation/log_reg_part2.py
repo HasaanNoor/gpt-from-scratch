@@ -10,25 +10,36 @@ def shape(a):
         a = a[0]
 
     return tuple(result)
+
+
     
-def transpose(a):
+def transpose(a, axes=None):
+    a_shape = shape(a)
+    ndims = len(shape(a_shape))
 
-    #2d
-    rows = len(a)
-    cols = len(a[0])
+    if ndims <= 1:
+        return a
 
-    result = []
-    for j in range(cols):
-        new_row = []
-        for i in range(rows):
-            new_row.append(a[i][j])
-        result.append(new_row)
+    elif ndims == 2:
+        rows, cols = a_shape
+        return [[a[i][j] for i in range(rows)] for j in range(cols)]
 
-    return result
+    else:
+        rev_shape = a_shape[::-1]
 
-a = [[1, 2],
-     [3, 4]]
-b = [[1, 2, 3, 4]]
+        def build(indices):
+            if len(indices) == ndims:
+                value = a
 
-print(transpose(a))
-print(transpose(b))
+                for i in indices[::-1]:
+                    value = value[i]
+
+                return value
+            return [build(indices + (i,)) for i in range(rev_shape[len(indices)])]
+
+        return build(())
+
+
+
+
+    

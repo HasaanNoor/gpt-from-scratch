@@ -1,4 +1,5 @@
 import math
+import random
 from from_scratch import from_scratch
 
 @from_scratch('numpy.shape')
@@ -14,6 +15,14 @@ def shape(a):
         a = a[0]
 
     return tuple(result)
+
+@from_scratch('numpy.random.rand')
+def rand(shape):
+
+    if not shape:
+        return random.random()
+
+    return [rand(shape[1:]) for _ in range(shape[0])]
 
 
 @from_scratch('numpy.broadcast_shapes')

@@ -57,12 +57,12 @@ def transpose(a, axes=None):
             return [build(indices + (i,)) for i in range(new_shape[len(indices)])]
         return build(())
 
-def rand(shape):
+def rand(*shape):
 
     if not shape:
         return random.random()
 
-    return [rand(shape[1:]) for _ in range(shape[0])]
+    return [rand(*shape[1:]) for _ in range(shape[0])]
 
 class MyModule:
     model_eval = False
@@ -148,20 +148,59 @@ class MySigmoid(MyModule):
 class MyLinear(MyModule):
 
     def __init__(self, in_features, out_features, bias=True):
-        import numpy as np
-
         self.in_features = in_features
         self.out_features = out_features
+        self.use_bias = bias
 
-        bound = 1 / np.sqrt(in_features)
+        self.weight = None
+        self.bias = None
 
-        weights = np.random.uniform(-bound, bound, (out_features, in_features))
+        self.reset_paramters()
+
+    def reset_parameters(self):
+        from numpy.random import rand
+        from numpy import array
+
+        bound = 1 / (self.in_features ** 0.5)
+        weights = array(rand(self.out_features, self.in_features))
+        weights = (2 * weights - 1) * bound
 
         self.weight = MyParameter(weights)
 
-        if bias:
-            biases = np.random.uniform(-bound, bound, out_features)
-            self.bias = myParameter(biases)
+        if self.use_bias:
+            biases = array(rand(self.out_features))
+            biases = (2 * biases - 1) * bound
 
-        else:
-            self.bias = None
+            self.bias = MyParameter(biases)
+
+    def parameters(self):
+        if self.bias is not None:
+            return [self.weight, self.bias]
+
+        return self.weight
+
+    def forward(self, x):
+        from numpy import matmul, transpose, add
+
+        self.input = x
+        output = matmul(x, transpose(self.weight.data))
+
+        if self.bias is not None:
+            output = add(output, self.bias.data)
+        
+        return output
+
+    def backward(self, d_out):
+        from numpy import matmul, transpose, sum
+
+        d_input = matmul(d_out, self.weight.data)
+        d_weight = matmul(transpose(d_out), self.input)
+
+        self.weight.backward(weight)
+
+        if self.bias is not None:
+            d_bias = sum(d_out, axis = 0)
+            self.bias_backward(d_bias)
+
+        return d_input
+    

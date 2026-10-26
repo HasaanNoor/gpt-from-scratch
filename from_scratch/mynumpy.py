@@ -17,12 +17,12 @@ def shape(a):
     return tuple(result)
 
 @from_scratch('numpy.random.rand')
-def rand(shape):
+def rand(*shape):
 
     if not shape:
         return random.random()
 
-    return [rand(shape[1:]) for _ in range(shape[0])]
+    return [rand(*shape[1:]) for _ in range(shape[0])]
 
 
 @from_scratch('numpy.broadcast_shapes')
@@ -424,4 +424,63 @@ class MySigmoid(MyModule):
 
     def backward(self, d_out):
         return d_out * self.output * (1 - self.output)
-    
+
+@from_scratch('torch.nn.Linear')
+class MyLinear(MyModule):
+
+    def __init__(self, in_features, out_features, bias=True):
+        self.in_features = in_features
+        self.out_features = out_features
+        self.use_bias = bias
+
+        self.weight = None
+        self.bias = None
+
+        self.reset_paramters()
+
+    def reset_parameters(self):
+        from numpy.random import rand
+        from numpy import array
+
+        bound = 1 / (self.in_features ** 0.5)
+        weights = array(rand(self.out_features, self.in_features))
+        weights = (2 * weights - 1) * bound
+
+        self.weight = MyParameter(weights)
+
+        if self.use_bias:
+            biases = array(rand(self.out_features))
+            biases = (2 * biases - 1) * bound
+
+            self.bias = MyParameter(biases)
+
+    def parameters(self):
+        if self.bias is not None:
+            return [self.weight, self.bias]
+
+        return self.weight
+
+    def forward(self, x):
+        from numpy import matmul, transpose, add
+
+        self.input = x
+        output = matmul(x, transpose(self.weight.data))
+
+        if self.bias is not None:
+            output = add(output, self.bias.data)
+        
+        return output
+
+    def backward(self, d_out):
+        from numpy import matmul, transpose, sum
+
+        d_input = matmul(d_out, self.weight.data)
+        d_weight = matmul(transpose(d_out), self.input)
+
+        self.weight.backward(weight)
+
+        if self.bias is not None:
+            d_bias = sum(d_out, axis = 0)
+            self.bias_backward(d_bias)
+
+        return d_input

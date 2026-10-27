@@ -64,6 +64,23 @@ def rand(*shape):
 
     return [rand(*shape[1:]) for _ in range(shape[0])]
 
+def zeros(shape, dtype=float):
+    if isinstance(shape, int):
+        shape = (shape,)
+
+    def zero_value():
+        if isinstance(dtype, list):
+            return tuple(0 for _ in dtype)
+        
+        return dtype(0)
+
+    def build(dim):
+        if dim == len(shape):
+            return zero_value()
+        return [build(dim + 1) for _ in range(shape[dim])]
+
+    return build(0)
+
 class MyModule:
     model_eval = False
 
@@ -155,29 +172,41 @@ class MyLinear(MyModule):
         self.weight = None
         self.bias = None
 
-        self.reset_paramters()
+        self.reset_parameters()
+
+    def __repr__(self):
+        return (f"Linear(in_features={self.in_features}, out_features={self.out_features}, bias={self.use_bias})")
 
     def reset_parameters(self):
         from numpy.random import rand
-        from numpy import array
+        from numpy import zeros
 
         bound = 1 / (self.in_features ** 0.5)
-        weights = array(rand(self.out_features, self.in_features))
-        weights = (2 * weights - 1) * bound
+        weights = zeros((self.out_features, self.in_features))
+        random_weights = rand(self.out_features, self.in_features)
+
+        for i in range(self.out_features):
+            for j in range(self.in_features):
+                weights[i][j] = (2 * random_weights[i][j] - 1) * bound
 
         self.weight = MyParameter(weights)
 
         if self.use_bias:
-            biases = array(rand(self.out_features))
-            biases = (2 * biases - 1) * bound
+            biases = zeros(self.out_features)
+            random_biases = rand(self.out_features)
+
+            for i in range(self.out_features):
+                biases[i] = (2 * random_biases[i] - 1) * bound
 
             self.bias = MyParameter(biases)
+        else:
+            self.bias = None
 
     def parameters(self):
         if self.bias is not None:
             return [self.weight, self.bias]
 
-        return self.weight
+        return [self.weight]
 
     def forward(self, x):
         from numpy import matmul, transpose, add
@@ -196,11 +225,49 @@ class MyLinear(MyModule):
         d_input = matmul(d_out, self.weight.data)
         d_weight = matmul(transpose(d_out), self.input)
 
-        self.weight.backward(weight)
+        self.weight.backward(d_weight)
 
         if self.bias is not None:
             d_bias = sum(d_out, axis = 0)
-            self.bias_backward(d_bias)
+            self.bias.backward(d_bias)
 
         return d_input
+
+class MySequential(MyModule):
+
+    def __init__(self, *modules):
+        self.modules = modules
+
+    def __repr__(self):
+            if not self.modules:
+                return "Sequential()"
     
+            result = "Sequential(\n"
+    
+            for i, module in enumerate(self.modules):
+                result += f"  ({i}): {repr(module)}\n"
+                
+            result += ")"
+            return result
+
+    def forward(self, x):
+        for module in self.modules:
+            x = module(x)
+
+        return x
+
+    def backward(self, d_out):
+        for module in reversed(self.modules):
+            d_out = module.backward(d_out)
+
+        return d_out
+
+    def parameters(self):
+        params = []
+
+        for module in self.modules:
+            params.extend(module.parameters())
+
+        return params
+
+

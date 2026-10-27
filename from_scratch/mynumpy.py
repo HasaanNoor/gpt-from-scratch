@@ -24,6 +24,120 @@ def rand(*shape):
 
     return [rand(*shape[1:]) for _ in range(shape[0])]
 
+@from_scratch('numpy.zeros')
+def zeros(shape, dtype=float):
+    if isinstance(shape, int):
+        shape = (shape,)
+
+    def zero_value():
+        if isinstance(dtype, list):
+            return tuple(0 for _ in dtype)
+        
+        return dtype(0)
+
+    def build(dim):
+        if dim == len(shape):
+            return zero_value()
+        return [build(dim + 1) for _ in range(shape[dim])]
+
+    return build(0)
+
+def matrix_2d(a, b):
+    rows_a = len(a)
+    cols_a = len(a[0])
+    rows_b = len(b)
+    cols_b = len(b[0])
+
+    if cols_a != rows_b:
+        raise ValueError("Matrices cannot be multiplied")
+
+    result = []
+
+    for i in range(rows_a):
+        row = []
+
+        for j in range(cols_b):
+            total = 0
+
+            for k in range(cols_a):
+                total += a[i][k] * b[k][j]
+            row.append(total)
+
+        result.append(row)
+    return result
+
+
+def batch_matmul(a, b):
+    if len(shape(a)) == 2:
+        return matrix_2d(a, b)
+
+    result = []
+
+    for sub_a, sub_b in zip(a, b):
+        result.append(batch_matmul(sub_a, sub_b))
+
+    return result
+
+@from_scratch('numpy.matmul')
+def matmul(a, b):
+    shape_a = shape(a)
+    shape_b = shape(b)
+
+    if len(shape_a) == 0 or len(shape_b) == 0:
+        raise ValueError("Matrix multiplication does not support scalar operands")
+
+    a_vector = len(shape_a) == 1
+    b_vector = len(shape_b) == 1
+
+    # Convert vectors into 2D matrices
+    if a_vector:
+        a = [a]
+
+    if b_vector:
+        b = [[x] for x in b]
+
+    shape_a = shape(a)
+    shape_b = shape(b)
+
+    # Check matrix multiplication compatibility
+    if shape_a[-1] != shape_b[-2]:
+        raise ValueError("Matrices cannot be multiplied")
+
+    # Determine common batch shape
+    batch_a = shape_a[:-2]
+    batch_b = shape_b[:-2]
+
+    common_batch = broadcast_shapes(batch_a, batch_b)
+
+    # Broadcast batch dimensions, preserving matrix dimensions
+    a = broadcast_to(a, common_batch + shape_a[-2:])
+    b = broadcast_to(b, common_batch + shape_b[-2:])
+
+    # Perform multiplication
+    result = batch_matmul(a, b)
+
+    # Remove temporary dimensions introduced for vectors
+    if a_vector:
+        if b_vector:
+            return result[0][0]
+
+        def remove_first_matrix_dim(x, depth):
+            if depth == 0:
+                return x[0]
+            return [remove_first_matrix_dim(item, depth - 1) for item in x]
+
+        result = remove_first_matrix_dim(result, len(common_batch))
+
+    if b_vector:
+        def remove_last_matrix_dim(x, depth):
+            if depth == 0:
+                return [row[0] for row in x]
+            return [remove_last_matrix_dim(item, depth - 1) for item in x]
+
+        result = remove_last_matrix_dim(result, len(common_batch))
+
+    return result
+
 
 @from_scratch('numpy.broadcast_shapes')
 def broadcast_shapes(*shapes):
@@ -378,6 +492,7 @@ class MyModule:
     def __repr__(self):
         return self.__target_path__.split('.')[-1] + "()"
 
+@from_scratch('torch.nn.Parameter')
 class MyParameter:
     def __init__(self, data, requires_grad=True):
         self.data = data
@@ -436,29 +551,41 @@ class MyLinear(MyModule):
         self.weight = None
         self.bias = None
 
-        self.reset_paramters()
+        self.reset_parameters()
+
+    def __repr__(self):
+        return (f"Linear(in_features={self.in_features}, out_features={self.out_features}, bias={self.use_bias})")
 
     def reset_parameters(self):
         from numpy.random import rand
-        from numpy import array
+        from numpy import zeros
 
         bound = 1 / (self.in_features ** 0.5)
-        weights = array(rand(self.out_features, self.in_features))
-        weights = (2 * weights - 1) * bound
+        weights = zeros((self.out_features, self.in_features))
+        random_weights = rand(self.out_features, self.in_features)
+
+        for i in range(self.out_features):
+            for j in range(self.in_features):
+                weights[i][j] = (2 * random_weights[i][j] - 1) * bound
 
         self.weight = MyParameter(weights)
 
         if self.use_bias:
-            biases = array(rand(self.out_features))
-            biases = (2 * biases - 1) * bound
+            biases = zeros(self.out_features)
+            random_biases = rand(self.out_features)
+
+            for i in range(self.out_features):
+                biases[i] = (2 * random_biases[i] - 1) * bound
 
             self.bias = MyParameter(biases)
+        else:
+            self.bias = None
 
     def parameters(self):
         if self.bias is not None:
             return [self.weight, self.bias]
 
-        return self.weight
+        return [self.weight]
 
     def forward(self, x):
         from numpy import matmul, transpose, add
@@ -477,10 +604,51 @@ class MyLinear(MyModule):
         d_input = matmul(d_out, self.weight.data)
         d_weight = matmul(transpose(d_out), self.input)
 
-        self.weight.backward(weight)
+        self.weight.backward(d_weight)
 
         if self.bias is not None:
             d_bias = sum(d_out, axis = 0)
-            self.bias_backward(d_bias)
+            self.bias.backward(d_bias)
 
         return d_input
+
+
+@from_scratch('torch.nn.Sequential')
+class MySequential(MyModule):
+
+    def __init__(self, *modules):
+        self.modules = modules
+
+    def __repr__(self):
+        if not self.modules:
+            return "Sequential()"
+
+        result = "Sequential(\n"
+
+        for i, module in enumerate(self.modules):
+            result += f"  ({i}): {repr(module)}\n"
+
+        result += ")"
+        return result
+
+    def forward(self, x):
+        for module in self.modules:
+            x = module(x)
+
+        return x
+
+    def backward(self, d_out):
+        for module in reversed(self.modules):
+            d_out = module.backward(d_out)
+
+        return d_out
+
+    def parameters(self):
+        params = []
+
+        for module in self.modules:
+            params.extend(module.parameters())
+
+        return params
+
+

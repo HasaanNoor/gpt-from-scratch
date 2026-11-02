@@ -4,6 +4,20 @@ import torch.nn as nn
 
 # A logistic regression example:
 class LogisticRegression(nn.Module):
+    """
+    >>> module = raschka.gpt.LogisticRegression(5)
+    >>> input = torch.randn(3, 5, requires_grad=True)
+    >>> list(module.parameters())
+    >>> output = module(input)
+    >>> d_out = torch.randn(output.size())
+    >>> if hasattr(module, '__target_path__'):
+    ...     d_in = module.backward(d_out)
+    ... else:
+    ...     (d_out * output).sum().backward()
+    ...     d_in = input.grad
+    >>> d_in
+    >>> [p.grad for p in module.parameters()]
+    """
     def __init__(self, num_inputs):
         super().__init__()
         self.linear = nn.Linear(num_inputs, 1)
@@ -33,6 +47,29 @@ def logistic_regression_check():
 
 # logistic_regression_check()
 
+# A logistic regression example:
+class SoftmaxRegression(nn.Module):
+    """
+    >>> module = raschka.gpt.SoftmaxRegression(5, 4)
+    >>> input = torch.randn(3, 5, requires_grad=True)
+    >>> list(module.parameters())
+    >>> output = module(input)
+    >>> d_out = torch.randn(output.size())
+    >>> if hasattr(module, '__target_path__'):
+    ...     d_in = module.backward(d_out)
+    ... else:
+    ...     (d_out * output).sum().backward()
+    ...     d_in = input.grad
+    >>> d_in
+    >>> [p.grad for p in module.parameters()]
+    """
+    def __init__(self, num_inputs, num_outputs):
+        super().__init__()
+        self.linear = nn.Linear(num_inputs, num_outputs)
+        self.softmax = nn.Softmax()
+    def forward(self, x):
+        return self.softmax(self.linear(x))
+
 
 ###########################################################################################
 # The following is from Sebastian Raschka's GPT from scratch:
@@ -53,6 +90,17 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class GPTDatasetV1(Dataset):
+    """
+    >>> tokenizer = tiktoken.get_encoding("gpt2")
+    >>> text = '''I HAD always thought Jack Gisburn rather a cheap genius--though a good fellow enough--so it was no great surprise to me to hear that, in the height of his glory, he had dropped his painting, married a rich widow, and established himself in a villa on the Riviera. (Though I rather thought it would have been Rome or Florence.)
+    ...
+    ... "The height of his glory"--that was what the women called it. I can hear Mrs. Gideon Thwing--his last Chicago sitter--deploring his unaccountable abdication. "Of course it's going to send the value of my picture 'way up; but I don't think of that, Mr. Rickham--the loss to Arrt is all I think of." The word, on Mrs. Thwing's lips, multiplied its _rs_ as though they were reflected in an endless vista of mirrors. And it was not only the Mrs. Thwings who mourned. Had not the exquisite Hermia Croft, at the last Grafton Gallery show, stopped me before Gisburn's "Moon-dancers" to say, with tears in her eyes: "We shall not look upon its like again"?
+    ...
+    ... '''
+    >>> dataset = raschka.gpt.GPTDatasetV1(text, tokenizer, 3, 3)
+    >>> len(dataset)
+    >>> list(dataset)
+    """
     def __init__(self, txt, tokenizer, max_length, stride):
         self.input_ids = []
         self.target_ids = []
@@ -74,8 +122,19 @@ class GPTDatasetV1(Dataset):
         return self.input_ids[idx], self.target_ids[idx]
 
 
+
 def create_dataloader_v1(txt, batch_size=4, max_length=256,
                          stride=128, shuffle=True, drop_last=True, num_workers=0):
+    """
+    >>> text = '''I HAD always thought Jack Gisburn rather a cheap genius--though a good fellow enough--so it was no great surprise to me to hear that, in the height of his glory, he had dropped his painting, married a rich widow, and established himself in a villa on the Riviera. (Though I rather thought it would have been Rome or Florence.)
+    ...
+    ... "The height of his glory"--that was what the women called it. I can hear Mrs. Gideon Thwing--his last Chicago sitter--deploring his unaccountable abdication. "Of course it's going to send the value of my picture 'way up; but I don't think of that, Mr. Rickham--the loss to Arrt is all I think of." The word, on Mrs. Thwing's lips, multiplied its _rs_ as though they were reflected in an endless vista of mirrors. And it was not only the Mrs. Thwings who mourned. Had not the exquisite Hermia Croft, at the last Grafton Gallery show, stopped me before Gisburn's "Moon-dancers" to say, with tears in her eyes: "We shall not look upon its like again"?
+    ...
+    ... '''
+    >>> dataloader = raschka.gpt.create_dataloader_v1(text, batch_size=2, max_length=5, stride=5)
+    >>> len(dataloader)
+    >>> list(dataloader)
+    """
     # Initialize the tokenizer
     tokenizer = tiktoken.get_encoding("gpt2")
 
@@ -84,7 +143,7 @@ def create_dataloader_v1(txt, batch_size=4, max_length=256,
 
     # Create dataloader
     dataloader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last, num_workers=num_workers)
+        dataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last, num_workers=num_workers, generator=torch.default_generator)
 
     return dataloader
 
@@ -93,6 +152,22 @@ def create_dataloader_v1(txt, batch_size=4, max_length=256,
 # Chapter 3
 #####################################
 class MultiHeadAttention(nn.Module):
+    """
+    >>> emb_dim, context_length, drop_rate, num_heads, qkv_bias = 8, 5, 0.5, 4, True
+    >>> num_batches, num_tokens = 2, 3
+    >>> module = raschka.gpt.MultiHeadAttention(emb_dim, emb_dim, context_length, drop_rate, num_heads, qkv_bias)
+    >>> input = torch.randn(num_batches, num_tokens, emb_dim, requires_grad=True)
+    >>> list(module.parameters())
+    >>> output = module(input)
+    >>> d_out = torch.randn(output.size())
+    >>> if hasattr(module, '__target_path__'):
+    ...     d_in = module.backward(d_out)
+    ... else:
+    ...     (d_out * output).sum().backward()
+    ...     d_in = input.grad
+    >>> d_in
+    >>> [p.grad for p in module.parameters()]
+    """
     def __init__(self, d_in, d_out, context_length, dropout, num_heads, qkv_bias=False):
         super().__init__()
         assert d_out % num_heads == 0, "d_out must be divisible by num_heads"
@@ -107,17 +182,6 @@ class MultiHeadAttention(nn.Module):
         self.out_proj = nn.Linear(d_out, d_out)  # Linear layer to combine head outputs
         self.dropout = nn.Dropout(dropout)
         self.register_buffer("mask", torch.triu(torch.ones(context_length, context_length), diagonal=1))
-
-        # extra field to help debugging
-        self.keys = None
-        self.queries = None
-        self.values = None
-        self.attn_scores = None
-        self.attn_weights = None
-        self.context_vec = None
-        self.scaled_attn = None
-        self.softmax_out = None
-
 
     def forward(self, x):
         b, num_tokens, d_in = x.shape
@@ -136,9 +200,6 @@ class MultiHeadAttention(nn.Module):
         keys = keys.transpose(1, 2)
         queries = queries.transpose(1, 2)
         values = values.transpose(1, 2)
-        self.keys = keys
-        self.queries = queries
-        self.values = values
 
         # Compute scaled dot-product attention (aka self-attention) with a causal mask
         attn_scores = queries @ keys.transpose(2, 3)  # Dot product for each head
@@ -148,25 +209,15 @@ class MultiHeadAttention(nn.Module):
 
         # Use the mask to fill attention scores
         attn_scores.masked_fill_(mask_bool, -torch.inf)
-        self.attn_scores = attn_scores
-        self.attn_scores.retain_grad()
 
         scaled_attn = attn_scores / keys.shape[-1]**0.5
-        self.scaled_attn = scaled_attn
-        self.scaled_attn.retain_grad()
 
         softmax_out = torch.softmax(scaled_attn, dim=-1)
-        self.softmax_out = softmax_out
-        self.softmax_out.retain_grad()
 
         attn_weights = self.dropout(softmax_out)
-        self.attn_weights = attn_weights
-        self.attn_weights.retain_grad()
 
         # Shape: (b, num_tokens, num_heads, head_dim)
         context_vec = (attn_weights @ values).transpose(1, 2)
-        self.context_vec = context_vec
-        self.context_vec.retain_grad()
 
         # Combine heads, where self.d_out = self.num_heads * self.head_dim
         context_vec = context_vec.contiguous().view(b, num_tokens, self.d_out)
@@ -179,6 +230,20 @@ class MultiHeadAttention(nn.Module):
 # Chapter 4
 #####################################
 class LayerNorm(nn.Module):
+    """
+    >>> module = raschka.gpt.LayerNorm(5)
+    >>> input = torch.randn(2, 3, 5, requires_grad=True)
+    >>> list(module.parameters())
+    >>> output = module(input)
+    >>> d_out = torch.randn(output.size())
+    >>> if hasattr(module, '__target_path__'):
+    ...     d_in = module.backward(d_out)
+    ... else:
+    ...     (d_out * output).sum().backward()
+    ...     d_in = input.grad
+    >>> d_in
+    >>> [p.grad for p in module.parameters()]
+    """
     def __init__(self, emb_dim):
         super().__init__()
         self.eps = 1e-5
@@ -193,6 +258,20 @@ class LayerNorm(nn.Module):
 
 
 class GELU(nn.Module):
+    """
+    >>> module = raschka.gpt.GELU()
+    >>> input = torch.randn(3, 5, requires_grad=True)
+    >>> list(module.parameters())
+    >>> output = module(input)
+    >>> d_out = torch.randn(output.size())
+    >>> if hasattr(module, '__target_path__'):
+    ...     d_in = module.backward(d_out)
+    ... else:
+    ...     (d_out * output).sum().backward()
+    ...     d_in = input.grad
+    >>> d_in
+    >>> [p.grad for p in module.parameters()]
+    """
     def __init__(self):
         super().__init__()
 
@@ -204,6 +283,21 @@ class GELU(nn.Module):
 
 
 class FeedForward(nn.Module):
+    """
+    >>> cfg = dict(emb_dim=6, context_length=4, n_heads=3, drop_rate=0.5, qkv_bias=False)
+    >>> module = raschka.gpt.FeedForward(cfg)
+    >>> input = torch.randn(3, cfg['emb_dim'], requires_grad=True)
+    >>> list(module.parameters())
+    >>> output = module(input)
+    >>> d_out = torch.randn(output.size())
+    >>> if hasattr(module, '__target_path__'):
+    ...     d_in = module.backward(d_out)
+    ... else:
+    ...     (d_out * output).sum().backward()
+    ...     d_in = input.grad
+    >>> d_in
+    >>> [p.grad for p in module.parameters()]
+    """
     def __init__(self, cfg):
         super().__init__()
         self.layers = nn.Sequential(
@@ -217,6 +311,21 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
+    """
+    >>> cfg = dict(emb_dim=6, context_length=4, n_heads=3, drop_rate=0.5, qkv_bias=False)
+    >>> module = raschka.gpt.TransformerBlock(cfg)
+    >>> input = torch.randn(2, cfg['context_length'], cfg['emb_dim'], requires_grad=True)
+    >>> list(module.parameters())
+    >>> output = module(input)
+    >>> d_out = torch.randn(output.size())
+    >>> if hasattr(module, '__target_path__'):
+    ...     d_in = module.backward(d_out)
+    ... else:
+    ...     (d_out * output).sum().backward()
+    ...     d_in = input.grad
+    >>> d_in
+    >>> [p.grad for p in module.parameters()]
+    """
     def __init__(self, cfg):
         super().__init__()
         self.att = MultiHeadAttention(
@@ -229,27 +338,36 @@ class TransformerBlock(nn.Module):
         self.ff = FeedForward(cfg)
         self.norm1 = LayerNorm(cfg["emb_dim"])
         self.norm2 = LayerNorm(cfg["emb_dim"])
-        self.drop_shortcut = nn.Dropout(cfg["drop_rate"])
+        self.drop_shortcut1 = nn.Dropout(cfg["drop_rate"])
+        self.drop_shortcut2 = nn.Dropout(cfg["drop_rate"])
 
     def forward(self, x):
         # Shortcut connection for attention block
         shortcut = x
         x = self.norm1(x)
         x = self.att(x)   # Shape [batch_size, num_tokens, emb_size]
-        x = self.drop_shortcut(x)
+        x = self.drop_shortcut1(x)
         x = x + shortcut  # Add the original input back
 
         # Shortcut connection for feed-forward block
         shortcut = x
         x = self.norm2(x)
         x = self.ff(x)
-        x = self.drop_shortcut(x)
+        x = self.drop_shortcut2(x)
         x = x + shortcut  # Add the original input back
 
         return x
 
 
 class GPTModel(nn.Module):
+    """
+    >>> cfg = dict(emb_dim=6, context_length=4, n_heads=3, drop_rate=0.5, qkv_bias=False, vocab_size=6, n_layers=2)
+    >>> module = raschka.gpt.GPTModel(cfg).train()
+    >>> input = torch.randint(0, cfg['vocab_size'], (2, cfg['context_length']))
+    >>> list(module.parameters())
+    >>> output = module(input)
+    >>> [p.grad for p in module.parameters()]
+    """
     def __init__(self, cfg):
         super().__init__()
         self.tok_emb = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"])
@@ -275,6 +393,18 @@ class GPTModel(nn.Module):
 
 
 def generate_text_simple(model, idx, max_new_tokens, context_size):
+    """
+    >>> cfg = dict(emb_dim=6, context_length=4, n_heads=3, drop_rate=0.5, qkv_bias=False, vocab_size=6, n_layers=2)
+    >>> model = raschka.gpt.GPTModel(cfg).eval()
+    >>> encoded_tensor = torch.randint(0, cfg['vocab_size'], (2, cfg["context_length"]))
+    >>> out = raschka.gpt.generate_text_simple(
+    ...     model=model,
+    ...     idx=encoded_tensor,
+    ...     max_new_tokens=10,
+    ...     context_size=cfg["context_length"]
+    ... )
+    """
+    idx = torch.tensor(idx)
     # idx is (B, T) array of indices in the current context
     for _ in range(max_new_tokens):
 
@@ -301,17 +431,20 @@ def generate_text_simple(model, idx, max_new_tokens, context_size):
 
 
 def main():
+    """
+    >>> raschka.gpt.main()
+    """
     GPT_CONFIG_124M = {
         "vocab_size": 50257,     # Vocabulary size
         "context_length": 1024,  # Context length
         "emb_dim": 768,          # Embedding dimension
         "n_heads": 12,           # Number of attention heads
         "n_layers": 12,          # Number of layers
-        "drop_rate": 0.1,        # Dropout rate
+        "drop_rate": 0.5,        # Dropout rate
         "qkv_bias": False        # Query-Key-Value bias
     }
 
-    torch.manual_seed(123)
+    # torch.manual_seed(123)
     model = GPTModel(GPT_CONFIG_124M)
     model.eval()  # disable dropout
 
@@ -338,7 +471,7 @@ def main():
     print("\nOutput:", out)
     print("Output length:", len(out[0]))
     print("Output text:", decoded_text)
-
+    return decoded_text
 
 if __name__ == "__main__":
     main()

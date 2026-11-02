@@ -297,8 +297,27 @@ def multiply(a, b):
 
 @from_scratch('numpy.true_divide')
 def true_divide(a, b):
+
     a, b = broadcast_arrays(a, b)
-    return elementwise_binary(a, b, lambda x, y: x / y)
+
+    def divide(x, y):
+        if y == 0:
+            if x == 0:
+                return float('nan')
+            
+            elif x > 0:
+                return float('inf')
+            
+            else:
+                return float('-inf')
+            
+        return x / y
+
+    return elementwise_binary(a, b, divide)
+
+@from_scratch("numpy.divide")
+def divide(a, b):
+    return true_divide(a, b)
 
 @from_scratch('numpy.greater')
 def greater(a, b):
@@ -457,6 +476,10 @@ def transpose(a, axes=None):
             return [build(indices + (i,)) for i in range(new_shape[len(indices)])]
         return build(())
 
+@from_scratch("numpy.permute_dims")
+def permute_dims(a, axes):
+    return transpose(a, axes=axes)
+
 class MyModule:
     model_eval = False
 
@@ -598,19 +621,39 @@ class MyLinear(MyModule):
         
         return output
 
+    
     def backward(self, d_out):
         from numpy import matmul, transpose, sum
 
+        ndims = len(d_out.shape)
+
         d_input = matmul(d_out, self.weight.data)
-        d_weight = matmul(transpose(d_out), self.input)
+
+        if ndims == 1:
+            d_weight = [[dy * x for x in self.input] for dy in d_out]
+            d_bias = d_out
+
+        else:
+            axes = list(range(ndims))
+            axes[-1], axes[-2] = axes[-2], axes[-1]
+
+            d_out_T = transpose(d_out, axes=tuple(axes))
+            d_weight = matmul(d_out_T, self.input)
+
+            for _ in range(ndims - 2):
+                d_weight = sum(d_weight, axis=0)
+
+            d_bias = d_out
+            for _ in range(ndims - 1):
+                d_bias = sum(d_bias, axis=0)
 
         self.weight.backward(d_weight)
 
         if self.bias is not None:
-            d_bias = sum(d_out, axis = 0)
             self.bias.backward(d_bias)
 
         return d_input
+
 
 
 @from_scratch('torch.nn.Sequential')
@@ -651,4 +694,60 @@ class MySequential(MyModule):
 
         return params
 
+class MyLoss:
+    def __init__(self):
+        self.value = None
+        self.d_in = None
+        self.model = None
+    def set_model(self, model):
+        self.model = model
+    def item(self):
+        return self.value
+    def forward(self, yhat, y):
+        raise NotImplementedError()
+    def backward(self):
+        d_in = self.d_in
+        if self.model is not None:
+            d_in = self.model.backward(d_in)
+        return d_in
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+@from_scratch('torch.nn.BCELoss')
+class MyBCELoss(MyLoss):
+    def forward(self, yhat, y):
+        from numpy import log, sum
+
+        n = 1
+        for dim in yhat.shape:
+            n *= dim
+
+        loss = -(y * log(yhat) + (1 - y) * log(1 - yhat))
+        self.value = sum(loss) / n
+        self.d_in = ((1 - y) / (1 - yhat) - y / yhat) / n
+
+        return self
+
+@from_scratch('torch.optim.Optimizer')
+class MyOptimizer:
+    def __init__(self, params, defaults=None):
+        if defaults is None:
+            defaults = {}
+        self.defaults = defaults
+        self.params = params
+
+    def zero_grad(self, set_to_none=True):
+        for param in self.params:
+            param.zero_grad(set_to_none=set_to_none)
+
+    def step(self):
+        raise NotImplementedError()
+
+    def __repr__(self):
+        s = f'{self.__target_path__.split('.')[-1]} (\n'
+        s += 'Parameter Group 0\n'
+        for k in sorted(self.defaults.keys()):
+            s += f'    {k}: {self.defaults[k]}\n'
+        s += ')'
+        return s
 

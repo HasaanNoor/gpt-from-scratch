@@ -46,14 +46,12 @@ def transpose(a, axes=None):
         def build(indices):
             if len(indices) == ndims:
                 original_indices = tuple(indices[axes.index(i)] for i in range(ndims))
-
                 value = a
 
                 for i in original_indices:
                     value = value[i]
 
                 return value
-
             return [build(indices + (i,)) for i in range(new_shape[len(indices)])]
         return build(())
 

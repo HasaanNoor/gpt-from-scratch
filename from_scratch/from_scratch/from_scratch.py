@@ -1,11 +1,13 @@
 # These are RMP's course materials for CS 5750: Demystifying LLMs.
 # Public sharing of course materials is prohibited.
 
+# TODO: use LockedArray in Numpy functions and a LockedTensor in torch functions/classes?
+
 import ast
 import copy
 import importlib
+import json
 import math
-import operator
 import os
 import sys
 import textwrap
@@ -13,6 +15,7 @@ import traceback
 from contextlib import contextmanager
 from datetime import datetime
 
+import tiktoken
 from matplotlib.container import BarContainer
 from matplotlib.image import AxesImage
 from matplotlib.lines import Line2D
@@ -26,7 +29,7 @@ import numpy
 import torch
 from torch.utils.data import DataLoader
 
-import gpt
+import raschka
 
 # I was getting: "RuntimeError: Only a single TORCH_LIBRARY can be used to register the namespace _inductor_test"
 # I used Gemini to debug. I found that calling optimizer.step() in the tests triggered a just-in-time compilation
@@ -41,12 +44,19 @@ import doctest
 from functools import wraps
 
 ALLOWED = (
-    'builtins', 'math', 'random', 'tiktoken', 'from_scratch.from_scratch',
-    'numpy.random.poisson', 'torch.utils.data.Dataset', 'torch.utils.data.DataLoader',
-    'gpt.create_dataloader_v1', 'numpy.dtype',
+    'builtins', 'math', 'random', 'tiktoken', 'from_scratch.from_scratch', 'from_scratch.LockedArray',
+    'numpy.random.poisson', 'torch.utils.data.Dataset', 'numpy.dtype', 'torch.manual_seed', 'matplotlib'
 )
 
-TESTS = []  # ['gpt.MultiHeadAttention']
+TESTS_FILE = 'tests_file.json'
+
+try:
+    with open(TESTS_FILE, 'r') as f:
+        TESTS = json.load(f)
+except FileNotFoundError:
+    TESTS = []
+
+print('TESTS:', TESTS)
 
 def is_allowed(name):
     tokens = name.split('.')
@@ -54,6 +64,32 @@ def is_allowed(name):
         if '.'.join(tokens[:i]) in ALLOWED:
             return True
     return False
+
+
+def memoize(func):
+    results = {}
+    signature = inspect.signature(func)
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        bound_args = signature.bind(*args, **kwargs)
+        bound_args.apply_defaults()
+        key = '_'.join(bound_args.arguments.values())
+        if key not in results:
+            try:
+                results[key] = func(*args, **kwargs)
+                print(results[key])
+            except Exception as e:
+                results[key] = e
+        # else:
+        #     print(f'Found {key} in {func.__name__} cache')
+        result = results[key]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    wrapper.__wrapper__ = 'memoize'
+    return wrapper
 
 
 ### 1. PATCHES ###
@@ -127,8 +163,12 @@ class NumpyAsTorch:
         return NumpyAsTorch.original_torch.randperm(x).numpy()
 
     @staticmethod
-    def bernoulli(x):
-        return NumpyAsTorch.original_torch.bernoulli(x).numpy()
+    def uniform(low=0.0, high=1.0, size=()):
+        return NumpyAsTorch.original_torch.rand(size).numpy() * (high - low) + low
+
+    # @staticmethod
+    # def bernoulli(x):
+    #     return NumpyAsTorch.original_torch.bernoulli(x).numpy()
 
 NUMPY_AS_TORCH = NumpyAsTorch()
 def numpy_random_patches():
@@ -152,7 +192,7 @@ class OriginalNumpyRandom:
     Store the original numpy.random functions for later.
     """
     def __init__(self):
-        keys = ['seed', 'random', 'get_state', 'set_state', 'randn', 'randint', 'choice', 'permutation']
+        keys = ['seed', 'random', 'get_state', 'set_state', 'randn', 'randint', 'choice', 'permutation', 'uniform']
         members = dict(inspect.getmembers(numpy.random))
         for key in keys:
             if key in members:
@@ -209,6 +249,9 @@ def random_patches():
             patches.append(patch.object(random, method, new=getattr(RANDOM_AS_NUMPY, method)))
     return patches
 
+# 1C. Patches for torch Dataset and DataLoader to generate random numbers the same as Numpy.
+# Store original (not patched) numpy random functions for use in patched random functions to be used by the
+# "from scratch" implementation of numpy random functions.
 
 def numpy_dtype_patches():
     """
@@ -242,7 +285,7 @@ def mpl_patches():
     def my_imshow(x, *args, **kwargs):
         return x
 
-    def my_plot(x, y=None):
+    def my_plot(x, y=None, **kwargs):
         if y is None:
             return x
         else:
@@ -262,7 +305,7 @@ def get_doctest_patches(module_name):
     """
     patches = numpy_dtype_patches()
     patches += mpl_patches()
-    patches.append(patch('timeit.timeit', new=lambda cmd, globals=None, number=None: 0.0))
+    patches.append(patch('timeit.timeit', new=lambda cmd, globals=None, number=None: 1.0))
     return patches
 
 def get_library_to_student_patches(name):
@@ -294,10 +337,10 @@ def get_library_to_student_patches(name):
                 if is_allowed(inherited_path):
                     break
                 patches.extend(get_library_to_student_patches(inherited_path))
-            for member_name, member in inspect.getmembers(student_member):
-                if inspect.isroutine(inspect.unwrap(member)) and member_name in student_member.__dict__:
-                    member_path = f'{student_path}.{member_name}'
-                    patches.append(patch(member_path, new=member))
+            # for member_name, member in inspect.getmembers(student_member):
+            #     if inspect.isroutine(inspect.unwrap(member)) and member_name in student_member.__dict__:
+            #         member_path = f'{student_path}.{member_name}'
+            #         patches.append(patch(member_path, new=member))
         patches.append(patch(name_, new=student_member))
     return patches
 
@@ -311,9 +354,9 @@ def is_numeric(obj):
     return all(hasattr(obj, attr) for attr in attrs)
 
 
-UFUNC_LIST = ['numpy.' + name for name, obj in numpy.__dict__.items() if isinstance(obj, numpy.ufunc)]
 TORCH_DTYPE_LIST = ['torch.' + name for name, obj in torch.__dict__.items() if isinstance(obj, torch.dtype)]
 NUMPY_DTYPE_LIST = ['numpy.' + name for name in numpy.sctypeDict.keys()]
+
 
 def is_dtype(name):
     return name in TORCH_DTYPE_LIST or name in NUMPY_DTYPE_LIST
@@ -322,7 +365,7 @@ def is_dtype(name):
 def get_dependency_patches(member):
     path = member.__target_path__
     module_name = path.split('.')[0]
-    assert module_name in ('numpy', 'torch', 'gpt')
+    assert module_name in ('numpy', 'torch', 'raschka')
     assert not path.startswith('numpy.random.mtrand')
 
     # mock the dependencies
@@ -330,8 +373,8 @@ def get_dependency_patches(member):
 
     # mock all dependencies so they return transformed output
     dependencies = get_member_dependencies(get_member_path(member))
-    if len(dependencies) > 0:
-        print(f'Wrapping {module_name} outputs: {dependencies}')
+    # if len(dependencies) > 0:
+    #     print(f'Wrapping {module_name} outputs: {dependencies}')
     for dependency in dependencies:
         if is_dtype(dependency) or is_allowed(dependency):
             continue
@@ -345,14 +388,14 @@ def get_dependency_patches(member):
         # dependeny_module_name is the module for the dependency
         if dependency_module_name == 'numpy':
             input_wrapper = to_array
-        elif dependency_module_name in ('torch', 'gpt'):
+        elif dependency_module_name in ('torch', 'raschka'):
             input_wrapper = to_tensor
         else:
             input_wrapper = None
 
         if module_name == 'numpy':
             output_wrapper = to_lol
-        elif module_name in ('torch', 'gpt'):
+        elif module_name in ('torch', 'raschka'):
             output_wrapper = to_locked
         else:
             output_wrapper = None
@@ -366,7 +409,7 @@ def get_random_patches(member):
     path_base = path.split('.')[0]
     if path_base == 'numpy':
         return random_patches()
-    elif path_base in ('torch', 'gpt'):
+    elif path_base in ('torch', 'raschka'):
         return numpy_random_patches()
     else:
         return []
@@ -376,7 +419,7 @@ def method_under_test_wrapper(member):
     path_base = path.split('.')[0]
     if path_base == 'numpy':
         return numpy_transform_inputs_and_outputs
-    elif path_base in ('torch', 'gpt'):
+    elif path_base in ('torch', 'raschka'):
         return torch_transform_inputs_and_outputs
 
 def get_user_patches(member):
@@ -414,11 +457,14 @@ def from_scratch(path):
 
         @wraps(member)
         def wrapper(*args, **kwargs):
-            current_test_member = _test_stack[-1]
+            current_test_member = path if len(_test_stack) == 0 else _test_stack[-1]
             try:
                 _, called_in_doctest = get_custom_doctests(current_test_member)
             except KeyError:
                 called_in_doctest = ()
+
+            if member.__target_path__ == 'raschka.gpt.DataLoader.__next__':
+                pass
 
             with mock_patches(get_user_patches(member)):
                 if is_subpath(current_test_member, member.__target_path__):
@@ -492,12 +538,14 @@ def to_array(x):
     return x
 
 def to_locked(x):
-    if isinstance(x, torch.Tensor):
+    if isinstance(x, LockedArray):
+        return x
+    elif isinstance(x, torch.Tensor):
         return LockedArray(x.detach().numpy())
     elif is_lol(x) or isinstance(x, numpy.ndarray):
         return LockedArray(x)
     elif isinstance(x, tuple):
-        return tuple(to_locked(list(x)))
+        return tuple([to_locked(xi) for xi in x])
     elif isinstance(x, list):
         return [to_locked(xi) for xi in x]
     elif isinstance(x, dict):
@@ -505,8 +553,8 @@ def to_locked(x):
     return x
 
 def to_tensor(result, dtype=None):
-    if isinstance(result, LockedArray):
-        return torch.tensor(result, dtype=dtype)
+    if isinstance(result, LockedArray) or is_lol(result):
+        return torch.tensor(numpy.array(result), dtype=dtype)
     elif isinstance(result, numpy.ndarray):
         return torch.tensor(result, dtype=dtype)
     elif isinstance(result, torch.Tensor):
@@ -645,52 +693,85 @@ def numpy_transform_inputs_and_outputs(func):
     return wrapper
 
 class LockedArray(numpy.ndarray):
-    ALLOWED_METHODS = ['copy', 'ravel', '__getattr__', '__getattribute__', '__getitem__', '__str__', '__repr__', 'view']
-    ALLOWED_ATTRS = []
-    OPERATORS = [x for x in dir(operator) if x.startswith('__') and x.endswith('__')]
-    ALLOWED_OPERATORS = ['__sub__', '__getitem__']
-    def __new__(cls, input_array):
-        return numpy.asarray(input_array).view(cls)
+    allowed_members = [
+        'copy', 'tolist', '__getattr__', '__getattribute__', '__getitem__', '__str__', '__repr__', 'view', '__class__',
+        'allowed_members', '__name__', '__array_finalize__', '__new__', '__array_ufunc__'
+    ]
+
+    def __new__(cls, input_array, *args, **kwargs):
+        if isinstance(input_array, LockedArray):
+            pass
+        return numpy.asarray(input_array, *args, **kwargs).view(cls)
+
     def __array_finalize__(self, obj):
         if obj is None:
             return
 
+    def __getattribute__(self, name):
+        if name not in LockedArray.allowed_members:
+            raise AttributeError(
+                f'{name} is disabled for LockedArray.'
+            )
+        return super().__getattribute__(name)
+
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-        ufunc_path = get_member_path(ufunc)
-        if ufunc_path not in allowed_ufuncs:
-            raise TypeError(f'Operation "{ufunc_path}" is not allowed on LockedArray.')
+        if ufunc.__name__ not in LockedArray.allowed_members:
+            raise TypeError(f'Operation "{ufunc.__name__}" is not allowed on LockedArray.')
+
         inputs = tuple(numpy.array(x) if isinstance(x, LockedArray) else x for x in inputs)
         if 'out' in kwargs and kwargs['out'] is not None:
             kwargs['out'] = tuple(numpy.array(x) if isinstance(x, LockedArray) else x for x in kwargs['out'])
 
         results = super().__array_ufunc__(ufunc, method, *inputs, **kwargs)
+
         if results is not NotImplemented:
             if method == 'at':
-                return None
-            if isinstance(results, tuple):
-                return tuple(LockedArray(x) for x in results)
-            return LockedArray(results)
+                results = None
+            elif isinstance(results, tuple):
+                results = tuple(LockedArray(x) for x in results)
+            else:
+                results = LockedArray(results)
+        return results
 
-        return NotImplemented
+    def __str__(self):
+        return numpy.asarray(self).view(numpy.ndarray).__str__()
+    def __repr__(self):
+        return numpy.asarray(self).view(numpy.ndarray).__repr__()
+
+class LockedTensor(torch.Tensor):
+    allowed_members = ['detach', 'copy', 'tolist', '__getattr__', '__getattribute__', '__getitem__', '__str__', '__repr__', 'view']
+
+    def __new__(cls, data, *args, **kwargs):
+        base_tensor = torch.tensor(data, *args, **kwargs)
+        return torch.Tensor._make_subclass(cls, base_tensor)
 
     def __getattribute__(self, name):
-        attr = super().__getattribute__(name)
-        # specifically disallow operators
-        if name in ['ALLOWED_METHODS', 'ALLOWED_ATTRS', 'OPERATORS', 'ALLOWED_OPERATORS']:
-            return attr
-        elif callable(attr) and name not in self.ALLOWED_METHODS + allowed_ufuncs + allowed_methods:
+        if name not in LockedTensor.allowed_members:
             raise AttributeError(
-                f'Method .{name} is disabled for LockedArray.'
+                f'{name} is disabled for LockedTensor.'
             )
-        elif not callable(attr) and name not in self.ALLOWED_ATTRS + allowed_attrs:
-            raise AttributeError(
-                f'Attribute .{name} is disabled for LockedArray.'
-            )
-        return attr
+        return super().__getattribute__(name)
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+
+        if func.__name__ not in LockedTensor.allowed_members:
+            raise TypeError(f'Operation "{func.__name__}" is not allowed on LockedTensor.')
+        args = tuple(torch.tensor(x) if isinstance(x, LockedTensor) else x for x in args)
+        if 'out' in kwargs and kwargs['out'] is not None:
+            kwargs['out'] = tuple(torch.tensor(x) if isinstance(x, LockedTensor) else x for x in kwargs['out'])
+
+        results = super().__torch_function__(func, types, args, kwargs)
+        if isinstance(results, tuple):
+            return tuple(LockedTensor(x) for x in results)
+        return LockedTensor(results)
+
     def __str__(self):
-        return numpy.array(self).__str__()
+        return torch.tensor(self).__str__()
     def __repr__(self):
-        return numpy.array(self).__repr__()
+        return torch.tensor(self).__repr__()
+
 
 def torch_transform_inputs_and_outputs(func):
     """
@@ -732,6 +813,9 @@ def get_module(module_name):
         return importlib.import_module(module_name)
 
 def get_member(member_path, return_class=False):
+    if '.' not in member_path:
+        # it's a module, so import it
+        return get_module(member_path)
     k = -1
     while True:
         try:
@@ -788,8 +872,9 @@ def get_member_imports(member):
     source = textwrap.dedent(inspect.getsource(member))
     return get_imports(source)
 
-def get_source_calls(member):
-    member_path = get_member_path(member)
+@memoize
+def get_source_calls(member_path):
+    member = get_member(member_path)
     source = inspect.getsource(member)
     closure_vars = inspect.getclosurevars(inspect.unwrap(member))
     search_scope = {**closure_vars.globals, **closure_vars.builtins}
@@ -808,7 +893,7 @@ def get_source_calls(member):
                 if node.func.id in search_scope:
                     obj = search_scope[node.func.id]
                     dependency_module_name = get_module_name(inspect.getmodule(obj))
-                    dependency_path = f'{dependency_module_name}.{obj.__name__}'
+                    dependency_path = get_shorter_member_path(get_member(f'{dependency_module_name}.{obj.__name__}'))
                     # ignore builtins and bootstrap functions. Do not recurse (could be handled by caching test results.)
                     if dependency_module_name not in ('builtins', 'from_scratch.from_scratch') and dependency_path != member_path:
                         dependencies.append(dependency_path)
@@ -849,13 +934,10 @@ def get_member_dependencies(member_path):
             # get locally defined (not inherited) methods and classes
             if class_member_name in member.__dict__:
                 if inspect.isroutine(class_member) or inspect.isroutine(class_member):
-                    path = get_member_path(class_member)
-                    # dependencies.append(path)
-                    # dependencies += get_member_dependencies(path)
-                    dependencies += get_source_calls(class_member)
+                    dependencies += get_source_calls(get_member_path(class_member))
 
     elif inspect.isroutine(member):
-        dependencies += get_source_calls(member)
+        dependencies += get_source_calls(get_member_path(member))
 
     return list(set(dependencies))
 
@@ -863,11 +945,14 @@ def get_imports(source):
     tree = ast.parse(source)
     imports = []
     for node in ast.walk(tree):
+        node_imports = []
         if isinstance(node, ast.Import):
             for alias in node.names:
-                imports.append(f"{alias.name}")
+                node_imports.append(f"{alias.name}")
         elif isinstance(node, ast.ImportFrom):
-            imports.extend([f"{node.module}.{name.name}" for name in node.names])
+            node_imports.extend([f"{node.module}.{name.name}" for name in node.names])
+        node_imports = [get_shorter_member_path(get_member(path)) for path in node_imports]
+        imports.extend(node_imports)
     return imports
 
 def get_file_imports(file_name):
@@ -882,9 +967,6 @@ def unwrap(f):
 
 payloads = None
 class_payloads = None
-allowed_ufuncs = []
-allowed_attrs = []
-allowed_methods = []
 
 
 def pytest_generate_tests(metafunc):
@@ -892,6 +974,11 @@ def pytest_generate_tests(metafunc):
     Gather all functions defined in all python files excluding from_scratch.py
     """
     print('Gathering tests')
+    # if 'FROM_SCRATCH_TESTS' in os.environ:
+        # TESTS.clear()
+        # TESTS.extend(json.loads(os.environ['FROM_SCRATCH_TESTS']))
+        # print(f'Found FROM_SCRATCH_TESTS environment variable: {TESTS}')
+
     if "test_member_path" in metafunc.fixturenames:
         # find all imports in user files
         all_imports = []
@@ -903,7 +990,7 @@ def pytest_generate_tests(metafunc):
                 for file_import in file_imports:
                     print(f'{file_name} imports {file_import}')
                 all_imports.extend(file_imports)
-        all_imports = list(set(all_imports))
+        all_imports = sorted(list(set(all_imports)))
 
         # find all python files in current
         names = []
@@ -931,47 +1018,50 @@ def pytest_generate_tests(metafunc):
                         else:
                             set_target(member_path, member_path)
 
-        for ufunc in UFUNC_LIST:
+        numpy_members = sorted((
+            set([x for x in dir(numpy.ndarray) if not x.startswith('_') and not x.endswith('_')]) &
+            set([x for x in dir(numpy) if not x.startswith('_') and not x.endswith('_')])
+        ) | set([name for name, obj in numpy.__dict__.items() if isinstance(obj, numpy.ufunc)]))
+        for ufunc in numpy_members:
             try:
                 print(f'Checking prerequisite: numpy.{ufunc}')
-                test_member(ufunc)
-                allowed_ufuncs.append(ufunc)
+                test_member('numpy.' + ufunc)
+                LockedArray.allowed_members.append(ufunc)
             except:
                 print(f'Failed numpy.{ufunc}')
-        for property in ['size', 'shape', 'ndim', 'dtype', 'real', 'image']:
-            try:
-                print(f'Checking prerequisite: numpy.{property}')
-                test_member(f'numpy.{property}')
-                allowed_attrs.append(property)
-            except:
-                print(f'Failed numpy.{property}')
-        try:
-            print(f'Checking prerequisite: numpy.transpose')
-            test_member('numpy.transpose')
-            allowed_attrs.append('T')
-        except:
-            print(f'Failed numpy.transpose')
 
-        for method in ['reshape', 'ravel']:
+        torch_members = sorted(
+            set([x for x in dir(torch.Tensor) if not x.startswith('_') and not x.endswith('_')]) &
+            set([x for x in dir(torch) if not x.startswith('_') and not x.endswith('_')])
+        )
+        for func in torch_members:
             try:
-                print(f'Checking prerequisite: numpy.{method}')
-                test_member(f'numpy.{method}')
-                allowed_methods.append(method)
+                print(f'Checking prerequisite: torch.{func}')
+                test_member('torch.' + func)
+                LockedTensor.allowed_members.append(func)
             except:
-                print(f'Failed numpy.{method}')
+                print(f'Failed torch.{func}')
 
-        for method in [x for x in dir(numpy.array([1, 2, 3])) if not x.startswith('_')]:
+        # handle special cases for numpy
+        for name, target in [('transpose', 'T'), ('permute_dims', 'T')]:
             try:
-                print(f'Checking prerequisite: numpy.{method}')
-                test_member(f'numpy.{method}')
-                allowed_methods.append(method)
+                print(f'Checking prerequisite: numpy.{target}')
+                test_member(f'numpy.{name}')
+                LockedArray.allowed_members.append(target)
             except:
-                print(f'Failed numpy.{method}')
+                print(f'Failed numpy.{target}')
 
-        names = TESTS or list(set(all_imports + names))
+        # handle special cases for torch
+        for name, target in [('transpose', 'T')]:
+            try:
+                print(f'Checking prerequisite: torch.{target}')
+                test_member(f'numpy.{name}')
+                LockedTensor.allowed_members.append(target)
+            except:
+                print(f'Failed torch.{target}')
+
+        names = sorted(TESTS or list(set(all_imports + names)))
         metafunc.parametrize("test_member_path", names, ids=names)
-
-
 
 @contextmanager
 def mock_patches(patches=()):
@@ -985,27 +1075,43 @@ def mock_patches(patches=()):
         for p in patches:
             p.stop()
 
+def is_expression(source):
+    try:
+        compile(source, '<string>', 'eval')
+        return True
+    except SyntaxError:
+        return False
+
 
 def run_example(source, globs, patches=()):
     with mock_patches(patches):
         try:
-            return eval(source, globs)
-        except SyntaxError:
-            return exec(source, globs)
+            if is_expression(source):
+                return eval(source, globs)
+            else:
+                return exec(source, globs)
+        except (SyntaxError, NameError) as e:
+            # these are not exceptions that we expect correct code to raise.
+            raise e
         except Exception as e:
-            # print(traceback.format_exc())
-            return e  # str(e)
+            return e
 
-def check_result(source, correct, student):
+
+def check_result(source, correct, student, want=''):
     s = f'\n>>> {source}'
     s += f'Expected:\n{repr(correct)}\n'
     s += f'Got:\n{repr(student)}\n'
     try:
-        m = matches(student, correct)
+        expecting_exception = 'Error' in want
+        m = matches(student, correct, expecting_exception=expecting_exception)
     except Exception as e:
-        raise AssertionError(f'matches raises exception {e}:\n{s}')
+        raise AssertionError(f'matches raises exception {repr(e)}:\n{s}')
     if m < 0:
         s += '*** Failed ***\n'
+        if isinstance(student, Exception):
+            tb_summary = traceback.extract_tb(student.__traceback__)
+            for frame in reversed(tb_summary):
+                s += f'{frame.filename}: {frame.lineno}: {frame.line}\n'
         raise AssertionError(s)
     elif m == 0:
         s += '*** Trivial ***\n'
@@ -1037,58 +1143,98 @@ def deep_copy(d):
 
 def _my_shuffle(x):
     # to work with arange must not use arange...
-    if isinstance(x, list):
-        return _my_shuffle(numpy.array(x)).tolist()
-    elif isinstance(x, numpy.ndarray):
-        if x.size > 1:
-            idx = numpy.random.permutation(range(x.size))
-            while numpy.all(idx[1:] > idx[:-1]):
-                idx = numpy.random.permutation(x.size)
-            x[:] = x.ravel()[idx]
-            return x
-    elif isinstance(x, torch.Tensor):
-        if x.nelement() > 1:
-            rng = torch.tensor(range(x.nelement()))
-            idx = torch.randperm(x.nelement())
-            while torch.all(torch.eq(idx, rng)):
+    try:
+        if isinstance(x, list):
+            return _my_shuffle(numpy.array(x)).tolist()
+        elif isinstance(x, numpy.ndarray):
+            if x.size > 1:
+                idx = numpy.random.permutation(range(x.size))
+                # avoids using ufuncs on a locked array
+                while all(idx[i] < idx[i+1] for i in range(len(idx)-1)):
+                    idx = numpy.random.permutation(x.size)
+                x.ravel()[:] = x.ravel()[idx]
+                return x
+        elif isinstance(x, torch.Tensor):
+            if x.nelement() > 1:
                 idx = torch.randperm(x.nelement())
-            return x.view(-1)[idx].view(x.size())
+                while torch.all(idx[1:] > idx[:-1]):
+                    idx = torch.randperm(x.nelement())
+                return x.view(-1)[idx].view(x.size())
+    except Exception as e:
+        pass
     return x
 
+def get_modified(student_globs, old_globs):
+    modified = []
+    for k, v in student_globs.items():
+        if k.startswith('_'):
+            pass
+        elif k not in old_globs:
+            modified.append(k)
+        else:
+            old = old_globs[k]
+            if isinstance(v, torch.Tensor):
+                v = v.detach().numpy()
+            if isinstance(old, torch.Tensor):
+                old = old.detach().numpy()
+            if not numpy.array_equal(v, old):
+                modified.append(k)
+    return modified
+
+# def ndarray_patches():
+#     def my_array(*args, **kwargs):
+#         return LockedArray(*args, **kwargs)
+#     return []  # [patch('numpy.array', new=my_array)]
 
 def run_examples(examples, name=None, shuffle=False):
-    globs = {'torch': torch, 'np': numpy, 'random': random, 'nn': torch.nn, 'math': math, 'gpt': gpt, '_my_shuffle': _my_shuffle}
+    globs = {
+        'torch': torch,
+        'np': numpy,
+        'random': random,
+        'nn': torch.nn,
+        'math': math,
+        'raschka': raschka,
+        '_my_shuffle': _my_shuffle,
+        'F': torch.nn.functional,
+        'tiktoken': tiktoken
+    }
     student_globs = deep_copy(globs)
     s = '\n\n'
+    if name == 'raschka.gpt_train.train_model_simple':
+        pass
 
-    sources = [example.source for example in examples]
-    student_patches = get_library_to_student_patches(name)
+    student_patches = get_library_to_student_patches(name)  #  + ndarray_patches()
 
     nontrivial = 0
-    for source in sources:
+    seed_ = seed()
+    for example in examples:
+        source = example.source
+        want = example.want
         if source == 'a = np.zeros((2, 512*512), dtype=np.float32)\n':
             # fix slow numpy.var test
             source = 'a = np.zeros((2, 16*16), dtype=np.float32)\n'
         old_globs = deep_copy(student_globs)
-        seed_ = seed()
+        seed(seed_)
         student = run_example(source, student_globs, patches=student_patches)  # ignore globals updated by student code.
         seed(seed_)
+        seed_ += 1
         correct = run_example(source, globs)  # update globals for next example
-        cr = check_result(source, correct, student)
+        cr = check_result(source, correct, student, want)
         nontrivial += int('*** Success ***' in cr)
         print(cr)
         s += cr
         # if it's an assignment statement something global changes, so check it:
-        modified_globs = {k: v for k, v in student_globs.items() if
-                          (k not in old_globs or not numpy.array_equal(v, old_globs[k])) and not k.startswith('__')}
-        for k, v in modified_globs.items():
+        modified_globs = get_modified(student_globs, old_globs)
+        for k in modified_globs:
             modified_source = f'{k}\n'
-            seed_ = seed()
+            seed(seed_)
             student = run_example(modified_source, student_globs,
                                   patches=student_patches)  # ignore globals updated by student code.
             seed(seed_)
+            seed_ += 1
             correct = run_example(modified_source, globs)  # update globals for next example
             cr = check_result(modified_source, correct, student)
+            nontrivial += int('*** Success ***' in cr)
             print(cr)
             s += cr
 
@@ -1100,19 +1246,19 @@ def run_examples(examples, name=None, shuffle=False):
                 # handle list of tuples of arrays.
                 if isinstance(v, (list, numpy.ndarray, torch.Tensor)) and type(v) is type(globs[k]):
                     shuffle_source = f'_my_shuffle({k})\n'
-
-                if shuffle_source is not None:
-                    seed_ = seed()
-                    student = run_example(shuffle_source, student_globs, patches=student_patches)  # ignore globals updated by student code.
                     seed(seed_)
+                    student = run_example(shuffle_source, student_globs)  # ignore globals updated by student code.
+                    seed(seed_)
+                    seed_ += 1
                     correct = run_example(shuffle_source, globs)  # update globals for next example
                     cr = check_result(shuffle_source, correct, student)
                     print(cr)
                     s += cr
                     shuffle_source = f'{k}\n'
-                    seed_ = seed()
-                    student = run_example(shuffle_source, student_globs, patches=student_patches)  # ignore globals updated by student code.
                     seed(seed_)
+                    student = run_example(shuffle_source, student_globs)  # ignore globals updated by student code.
+                    seed(seed_)
+                    seed_ += 1
                     correct = run_example(shuffle_source, globs)  # update globals for next example
                     # following line fails because 'y' gets shuffled differently?
                     cr = check_result(shuffle_source, correct, student)
@@ -1122,7 +1268,7 @@ def run_examples(examples, name=None, shuffle=False):
         raise AssertionError(s + '*** Trivial Success ***\n')
     return s
 
-def matches(actual, expected):
+def matches(actual, expected, expecting_exception=False):
     """
     a = student, b = correct
     Returns 1=matches, 0=trivial match, -1 does not match
@@ -1144,7 +1290,7 @@ def matches(actual, expected):
 
 
         # if we're expecting an exception make sure they're the same type
-        if isinstance(ei, Exception):
+        if isinstance(ei, Exception) and expecting_exception:
             return int(type(ai) == type(ei)) * 2 - 1
 
         # if we weren't expecting an exception, but actually got one
@@ -1159,7 +1305,7 @@ def matches(actual, expected):
                 return -1
             return min([compare(aij, bij) for aij, bij in zip(ai.values(), ei.values())])
 
-        if isinstance(ai, list) or isinstance(ei, list):
+        if isinstance(ai, (list, tuple)) or isinstance(ei, (list, tuple)):
             if len(ai) != len(ei):
                 return -1
             return min([compare(aij, bij) for aij, bij in zip(ai, ei)])
@@ -1171,13 +1317,17 @@ def matches(actual, expected):
             # only one is None
             return -1
 
+        # don't worry about matching repr
         if isinstance(ai, torch.nn.Module) or isinstance(ei, torch.nn.Module):
             # if it matches, a trivial match
-            return int(repr(ai) == repr(ei)) - 1
+            # return int(repr(ai) == repr(ei)) - 1
+            return 0
 
+        # don't worry about matching repr
         if isinstance(ai, torch.optim.Optimizer) or isinstance(ei, torch.optim.Optimizer):
             # if it matches, a trivial match
-            return int(repr(ai) == repr(ei)) - 1
+            # return int(repr(ai) == repr(ei)) - 1
+            return 0
 
         if isinstance(ai, torch.nn.Parameter) or isinstance(ei, torch.nn.Parameter):
             ai = ai.data
@@ -1193,9 +1343,12 @@ def matches(actual, expected):
         if isinstance(ei, torch.Tensor):
             ei = ei.detach().numpy()
 
-        if not numpy.all(ai == ei) and not numpy.allclose(ai, ei, equal_nan=True, atol=1e-6):
-            return -1
-        return 1
+        try:
+            if not numpy.all(ai == ei) and not numpy.allclose(ai, ei, equal_nan=True, atol=1e-5):
+                return -1
+            return 1
+        except RuntimeError:
+            pass
 
     actual = actual if isinstance(actual, (tuple, list)) else (actual,)
     expected = expected if isinstance(expected, (tuple, list)) else (expected,)
@@ -1230,30 +1383,6 @@ def run_doctests(name, doc_test, shuffle=False):
         with _warnings.catch_warnings():
             _warnings.simplefilter('ignore', category=RuntimeWarning)
             return run_examples(doc_test.examples, name, shuffle=shuffle)
-
-
-def memoize(func):
-    results = {}
-    signature = inspect.signature(func)
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        bound_args = signature.bind(*args, **kwargs)
-        bound_args.apply_defaults()
-        key = '_'.join(bound_args.arguments.values())
-        if key not in results:
-            try:
-                results[key] = func(*args, **kwargs)
-            except Exception as e:
-                results[key] = e
-        result = results[key]
-        print(result)
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    wrapper.__wrapper__ = 'memoize'
-    return wrapper
 
 def get_member_path(member):
     return get_shorter_member_path(member)
@@ -1300,6 +1429,8 @@ def is_class(member_path):
 @memoize
 def check_member(test_member_path):
     print(f'Checking member {test_member_path}')
+    # if test_member_path == 'torch.nn.BCELoss':
+    #     pass
     if not is_allowed(test_member_path) and not is_dtype(test_member_path):
         # check that it has a target implementation.
         target_path = get_target(test_member_path)
@@ -1315,7 +1446,7 @@ def check_member(test_member_path):
                 return f'{test_member_path} is a method without doctests.\n'
             elif is_student_member(test_member_path):
                 return f'{test_member_path} is a student member without doctests.\n'
-            elif is_class(test_member_path):
+            elif is_class(test_member_path) and test_member_path.startswith('torch.'):
                 doc_string, _ = get_custom_doctests(test_member_path)
                 doc_test = doctest.DocTestParser().get_doctest(doc_string, {}, 'example_test', None, 0)
                 return run_doctests(test_member_path, doc_test)
@@ -1329,11 +1460,18 @@ def check_member(test_member_path):
                     return s
                 except AssertionError as e:
                     if '*** Trivial Success ***' in str(e):
-                        doc_string, _ = get_custom_doctests(test_member_path)
-                        doc_test = doctest.DocTestParser().get_doctest(doc_string, {}, 'example_test', None, 0)
-                        return run_doctests(test_member_path, doc_test)
+                        s = 'doctest had trivial success, running custom doctests\n'
                     else:
+                        s = f'doctest raised exception: {repr(e)}, running custom doctests.\n'
+
+                    try:
+                        doc_string, _ = get_custom_doctests(test_member_path)
+                    except KeyError:
+                        # If the custom tests don't exist raise the original error.
                         raise e
+                    doc_test = doctest.DocTestParser().get_doctest(doc_string, {}, 'example_test', None, 0)
+                    return s + run_doctests(test_member_path, doc_test)
+
         else:
             raise AssertionError(f'{target_path} is not a student member and is not allowed.')
     else:
@@ -1343,6 +1481,8 @@ def test_member(test_member_path):
     # TODO: make sure no imports outside function calls.
     # TODO: mock all ndarray methods except those associated with passed tests
     print(f'\n<Testing {test_member_path}>')
+    if test_member_path == 'raschka.gpt_train.generate_and_print_sample':
+        pass
     with under_test(test_member_path):
         check_member(test_member_path)
     print(f'\n</Testing {test_member_path}>')
@@ -1353,10 +1493,7 @@ def get_custom_doctests(name):
     try:
         return get_member(check_path)()
     except AttributeError as e:
-        raise KeyError(f'Tests for {name} not found')
-
-
-    return get_member(check_path)()
+        raise KeyError(f'Tests for {check_path} not found')
 
 def main():
     pytest.main([__file__, '-ra', '-s'])

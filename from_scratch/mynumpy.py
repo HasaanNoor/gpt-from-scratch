@@ -701,15 +701,19 @@ class MyLoss:
         self.model = None
     def set_model(self, model):
         self.model = model
+
     def item(self):
         return self.value
+    
     def forward(self, yhat, y):
         raise NotImplementedError()
+    
     def backward(self):
         d_in = self.d_in
         if self.model is not None:
             d_in = self.model.backward(d_in)
         return d_in
+    
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
@@ -751,3 +755,45 @@ class MyOptimizer:
         s += ')'
         return s
 
+from_scratch('torch.optim.SGD')
+class MySGD(MyOptimizer):
+    def __init__(self, params, lr=0.001):
+        defaults = {
+            "lr": lr,
+            "momentum": 0,
+            "dampening": 0,
+            "weight_decay": 0,
+            "nesterov": False,
+            "maximize": False,
+            "foreach": None,
+            "differentiable": False,
+            "fused": None
+        }
+
+        super().__init__(params, defaults)
+
+        self.lr = lr
+
+    def step(self):
+        for param in self.params:
+            if param.grad is None:
+                continue
+
+            param.data = param.data - self.lr * param.grad
+
+@from_scratch('raschka.gpt.LogisticRegression')
+class MyLogisticRegression(MyModule):
+    def __init__(self, num_features):
+        self.linear = MyLinear(num_features, 1)
+        self.sigmoid = MySigmoid()
+
+    def forward(self, x):
+        z = self.linear(x)
+        return self.sigmoid(z)
+
+    def backward(self, d_out):
+        d_out = self.sigmoid.backward(d_out)
+        return self.linear.backward(d_out)
+
+    def parameters(self):
+        return self.linear.parameters()

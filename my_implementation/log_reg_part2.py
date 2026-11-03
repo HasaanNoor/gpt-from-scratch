@@ -268,4 +268,103 @@ class MySequential(MyModule):
 
         return params
 
+class MyLoss:
+    def __init__(self):
+        self.value = None
+        self.d_in = None
+        self.model = None
 
+    def set_model(self, model):
+        self.model = model
+        
+    def item(self):
+        return self.value
+    
+    def forward(self, yhat, y):
+        raise NotImplementedError()
+    
+    def backward(self):
+        d_in = self.d_in
+        if self.model is not None:
+            d_in = self.model.backward(d_in)
+        return d_in
+    
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+class MyBCELoss(MyLoss):
+    def forward(self, yhat, y):
+        from numpy import log, sum
+
+        n = 1
+        for dim in yhat.shape:
+            n *= dim
+
+        loss = -(y * log(yhat) + (1 - y) * log(1 - yhat))
+        self.value = sum(loss) / n
+        self.d_in = ((1 - y) / (1 - yhat) - y / yhat) / n
+
+        return self
+
+class MyOptimizer:
+    def __init__(self, params, defaults=None):
+        if defaults is None:
+            defaults = {}
+        self.defaults = defaults
+        self.params = params
+
+    def zero_grad(self, set_to_none=True):
+        for param in self.params:
+            param.zero_grad(set_to_none=set_to_none)
+
+    def step(self):
+        raise NotImplementedError()
+
+    def __repr__(self):
+        s = f'{self.__target_path__.split('.')[-1]} (\n'
+        s += 'Parameter Group 0\n'
+        for k in sorted(self.defaults.keys()):
+            s += f'    {k}: {self.defaults[k]}\n'
+        s += ')'
+        return s
+
+class MySGD(MyOptimizer):
+    def __init__(self, params, lr=0.001):
+        defaults = {
+            "lr": lr,
+            "momentum": 0,
+            "dampening": 0,
+            "weight_decay": 0,
+            "nesterov": False,
+            "maximize": False,
+            "foreach": None,
+            "differentiable": False,
+            "fused": None
+        }
+
+        super().__init__(params, defaults)
+
+        self.lr = lr
+
+    def step(self):
+        for param in self.params:
+            if param.grad is None:
+                continue
+
+            param.data = param.data - self.lr * param.grad
+
+class MyLogisticRegression(MyModule):
+    def __init__(self, num_features):
+        self.linear = MyLinear(num_features, 1)
+        self.sigmoid = MySigmoid()
+
+    def forward(self, x):
+        z = self.linear(x)
+        return self.sigmoid(z)
+
+    def backward(self, d_out):
+        d_out = self.sigmoid.backward(d_out)
+        return self.linear.backward(d_out)
+
+    def parameters(self):
+        return self.linear.parameters()

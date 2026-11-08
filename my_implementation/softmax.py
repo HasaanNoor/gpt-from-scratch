@@ -1,5 +1,3 @@
-def myMax
-
 class MyModule:
     model_eval = False
 
@@ -71,6 +69,51 @@ class MyParameter:
         else:
             self.grad[:] = d_out
 
+class MyLoss:
+    def __init__(self):
+        self.value = None
+        self.d_in = None
+        self.model = None
+    def set_model(self, model):
+        self.model = model
+
+    def item(self):
+        return self.value
+    
+    def forward(self, yhat, y):
+        raise NotImplementedError()
+    
+    def backward(self):
+        d_in = self.d_in
+        if self.model is not None:
+            d_in = self.model.backward(d_in)
+        return d_in
+    
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+class MyOptimizer:
+    def __init__(self, params, defaults=None):
+        if defaults is None:
+            defaults = {}
+        self.defaults = defaults
+        self.params = params
+
+    def zero_grad(self, set_to_none=True):
+        for param in self.params:
+            param.zero_grad(set_to_none=set_to_none)
+
+    def step(self):
+        raise NotImplementedError()
+
+    def __repr__(self):
+        s = f'{self.__target_path__.split('.')[-1]} (\n'
+        s += 'Parameter Group 0\n'
+        for k in sorted(self.defaults.keys()):
+            s += f'    {k}: {self.defaults[k]}\n'
+        s += ')'
+        return s
+    
 class MySoftmax(MyModule):
     def __init__(self, dim=None):
         self.dim = dim
@@ -80,27 +123,35 @@ class MySoftmax(MyModule):
         return f"Softmax(dim={self.dim})"
 
     def forward(self, x):
-        from numpy import exp, max, sum
-        dim = self.dim
+        from numpy import exp, sum
 
-        if dim is None:
-            if x.ndim in (0, 1, 3):
-                dim = 0
-            else:
-                dim = 1
-        self.actual_dim = dim
-
-        shifted  = x - max(x, axis=dim, keepdims=True)
-        exponentials = exp(shifted)
-        denominator = sum(exponentials, axis=dim, keepdims=True)
-
+        exponentials = exp(x)
+        denominator = sum(exponentials, axis=self.dim, keepdims=True)
         self.output = exponentials / denominator
 
         return self.output
 
     def backward(self, d_out):
         from numpy import sum
-        projection = sum(d_out * self.output, axis = self.actual_dim, keepdims=True)
 
-        return self.output * (d_out - projection)
-    
+        weighted_grad_sum = sum(d_out * self.output, axis=self.dim, keepdims=True)
+        d_input = self.output * (d_out - weighted_grad_sum)
+        return d_input
+
+@from_scratch("torch.nn.CrossEntropyLoss")
+class MyCrossEntropyLoss(MyLoss):
+
+    def __repr__(self):
+        return "CrossEntropyLoss()"
+
+    def forward(self, logits, target):
+        from numpy import exp, log, sum
+
+        exponentials = exp(logits)
+        probabilities = exponentials / sum(exponentials, axis=1, keepdims=True)
+        batch_size = logits.shape[0]
+        losses = -target * log(probabilities)
+        self.value = sum(losses) / batch_size
+        self.d_in = (probabilities - target) / batch_size
+        
+        return self

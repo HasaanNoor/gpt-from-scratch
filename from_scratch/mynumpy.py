@@ -24,24 +24,6 @@ def rand(*shape):
 
     return [rand(*shape[1:]) for _ in range(shape[0])]
 
-@from_scratch('numpy.zeros')
-def zeros(shape, dtype=float):
-    if isinstance(shape, int):
-        shape = (shape,)
-
-    def zero_value():
-        if isinstance(dtype, list):
-            return tuple(0 for _ in dtype)
-        
-        return dtype(0)
-
-    def build(dim):
-        if dim == len(shape):
-            return zero_value()
-        return [build(dim + 1) for _ in range(shape[dim])]
-
-    return build(0)
-
 def matrix_2d(a, b):
     rows_a = len(a)
     cols_a = len(a[0])
@@ -581,25 +563,12 @@ class MyLinear(MyModule):
 
     def reset_parameters(self):
         from numpy.random import rand
-        from numpy import zeros
 
         bound = 1 / (self.in_features ** 0.5)
-        weights = zeros((self.out_features, self.in_features))
-        random_weights = rand(self.out_features, self.in_features)
-
-        for i in range(self.out_features):
-            for j in range(self.in_features):
-                weights[i][j] = (2 * random_weights[i][j] - 1) * bound
-
+        weights = (2 * rand(self.out_features, self.in_features) - 1) * bound
         self.weight = MyParameter(weights)
-
         if self.use_bias:
-            biases = zeros(self.out_features)
-            random_biases = rand(self.out_features)
-
-            for i in range(self.out_features):
-                biases[i] = (2 * random_biases[i] - 1) * bound
-
+            biases = (2 * rand(self.out_features) - 1) * bound
             self.bias = MyParameter(biases)
         else:
             self.bias = None
@@ -631,25 +600,22 @@ class MyLinear(MyModule):
 
         if ndims == 1:
             d_weight = [[dy * x for x in self.input] for dy in d_out]
-            d_bias = d_out
 
         else:
             axes = list(range(ndims))
-            axes[-1], axes[-2] = axes[-2], axes[-1]
+            axes[-1], axes[-2] = (axes[-2], axes[-1])
 
             d_out_T = transpose(d_out, axes=tuple(axes))
             d_weight = matmul(d_out_T, self.input)
-
-            for _ in range(ndims - 2):
-                d_weight = sum(d_weight, axis=0)
-
-            d_bias = d_out
-            for _ in range(ndims - 1):
-                d_bias = sum(d_bias, axis=0)
+            d_weight = sum(d_weight, axis=tuple(range(ndims - 2)))
 
         self.weight.backward(d_weight)
 
         if self.bias is not None:
+            if ndims == 1:
+                d_bias = d_out
+            else:
+                d_bias = sum(d_out, axis=tuple(range(ndims - 1)))
             self.bias.backward(d_bias)
 
         return d_input
@@ -726,9 +692,8 @@ class MyBCELoss(MyLoss):
         for dim in yhat.shape:
             n *= dim
 
-        loss = -(y * log(yhat) + (1 - y) * log(1 - yhat))
-        self.value = sum(loss) / n
-        self.d_in = ((1 - y) / (1 - yhat) - y / yhat) / n
+        self.value = -sum(y * log(yhat) + (1 - y) * log(1 - yhat)) / n
+        self.d_in = ((yhat - y) / (yhat * (1 - yhat) * n))
 
         return self
 
@@ -755,31 +720,61 @@ class MyOptimizer:
         s += ')'
         return s
 
-from_scratch('torch.optim.SGD')
+@from_scratch('torch.optim.SGD')
 class MySGD(MyOptimizer):
-    def __init__(self, params, lr=0.001):
+    def __init__(self, params, lr = 0.001, momentum = 0, dampening = 0, weight_decay = 0, nesterov = False, maximize = False, foreach = None, differentiable = False, fused = None):
         defaults = {
             "lr": lr,
-            "momentum": 0,
-            "dampening": 0,
-            "weight_decay": 0,
-            "nesterov": False,
-            "maximize": False,
-            "foreach": None,
-            "differentiable": False,
-            "fused": None
+            "momentum": momentum,
+            "dampening": dampening,
+            "weight_decay": weight_decay,
+            "nesterov": nesterov,
+            "maximize": maximize,
+            "foreach": foreach,
+            "differentiable": differentiable,
+            "fused": fused
         }
 
         super().__init__(params, defaults)
 
         self.lr = lr
+        self.momentum = momentum
+        self.dampening = dampening
+        self.weight_decay = weight_decay
+        self.nesterov = nesterov
+        self.maximize = maximize
+        self.momentum_buffers = [None for _ in params]
 
     def step(self):
-        for param in self.params:
+        for i, param in enumerate(self.params):
             if param.grad is None:
                 continue
 
-            param.data = param.data - self.lr * param.grad
+            grad = param.grad
+
+            if self.maximize:
+                grad = -grad
+
+            if self.weight_decay != 0:
+                grad = (grad + self.weight_decay * param.data)
+
+            if self.momentum != 0:
+                buffer = self.momentum_buffers[i]
+
+                if buffer is None:
+                    buffer = grad * 1
+                else:
+                    buffer = (self.momentum * buffer + (1 - self.dampening) * grad)
+
+                self.momentum_buffers[i] = buffer
+
+            if self.nesterov:
+                grad = grad + self.momentum * buffer
+            else:
+                grad = buffer
+
+            param.data = (param.data - self.lr * grad)
+
 
 @from_scratch('raschka.gpt.LogisticRegression')
 class MyLogisticRegression(MyModule):
@@ -797,3 +792,45 @@ class MyLogisticRegression(MyModule):
 
     def parameters(self):
         return self.linear.parameters()
+
+@from_scratch("torch.nn.Softmax")
+class MySoftmax(MyModule):
+    def __init__(self, dim=None):
+        self.dim = dim
+        self.output = None
+
+    def __repr__(self):
+        return f"Softmax(dim={self.dim})"
+
+    def forward(self, x):
+        from numpy import exp, sum
+
+        exponentials = exp(x)
+        denominator = sum(exponentials, axis=self.dim, keepdims=True)
+        self.output = exponentials / denominator
+
+        return self.output
+
+    def backward(self, d_out):
+        from numpy import sum
+
+        weighted_grad_sum = sum(d_out * self.output, axis=self.dim, keepdims=True)
+        d_input = self.output * (d_out - weighted_grad_sum)
+        return d_input
+
+@from_scratch('torch.nn.CrossEntropyLoss')
+class MyCrossEntropyLoss(MyLoss):
+    def __repr__(self):
+        return "CrossEntropyLoss()"
+
+    def forward(self, logits, target):
+        from numpy import exp, log, sum
+
+        exponentials = exp(logits)
+        probabilities = exponentials / sum(exponentials, axis=1, keepdims=True)
+        batch_size = logits.shape[0]
+        losses = -target * log(probabilities)
+        self.value = sum(losses) / batch_size
+        self.d_in = (probabilities - target) / batch_size
+        
+        return self

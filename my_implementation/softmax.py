@@ -1,3 +1,17 @@
+def maximum(x1, x2):
+    x1, x2 = broadcast_arrays(x1, x2)
+
+    def maximum_element(a, b):
+        if a != a:
+            return a
+
+        if b != b:
+            return b
+
+        return a if a >= b else b
+
+    return elementwise_binary(x1, x2, maximum_element)
+
 class MyModule:
     model_eval = False
 
@@ -155,3 +169,89 @@ class MyCrossEntropyLoss(MyLoss):
         self.d_in = (probabilities - target) / batch_size
         
         return self
+
+@from_scratch("torch.optim.AdamW")
+class MyAdamW(MyOptimizer):
+
+    def __init__(
+        self,
+        params,
+        lr=0.001,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=0.01,
+        amsgrad=False,
+        maximize=False,
+        foreach=None,
+        capturable=False,
+        differentiable=False,
+        fused=None
+    ):
+        params = list(params)
+
+        defaults = {
+            "lr": lr,
+            "betas": betas,
+            "eps": eps,
+            "weight_decay": weight_decay,
+            "amsgrad": amsgrad,
+            "maximize": maximize,
+            "foreach": foreach,
+            "capturable": capturable,
+            "differentiable": differentiable,
+            "fused": fused
+        }
+
+        super().__init__(params, defaults)
+
+        self.lr = lr
+        self.beta1, self.beta2 = betas
+        self.eps = eps
+        self.weight_decay = weight_decay
+        self.amsgrad = amsgrad
+        self.maximize = maximize
+
+        self.steps = [0 for _ in params]
+        self.exp_avgs = [param.data * 0 for param in params]
+        self.exp_avg_sqs = [param.data * 0 for param in params]
+        self.max_exp_avg_sqs = [param.data * 0 for param in params]
+
+    def step(self):
+        from numpy import maximum, sqrt
+
+        for i, param in enumerate(self.params):
+            if param.grad is None:
+                continue
+
+            grad = param.grad
+
+            if self.maximize:
+                grad = -grad
+
+            # Decoupled weight decay
+            param.data = param.data * (1 - self.lr * self.weight_decay)
+
+            # Increment step count
+            self.steps[i] += 1
+
+            # First moment
+            self.exp_avgs[i] = (self.beta1 * self.exp_avgs[i] + (1 - self.beta1) * grad)
+
+            # Second moment
+            self.exp_avg_sqs[i] = (self.beta2 * self.exp_avg_sqs[i] + (1 - self.beta2) * grad * grad)
+
+            if self.amsgrad:
+                self.max_exp_avg_sqs[i] = maximum(self.max_exp_avg_sqs[i], self.exp_avg_sqs[i])
+                second_moment = (self.max_exp_avg_sqs[i])
+            else:
+                second_moment = self.exp_avg_sqs[i]
+
+            # Bias corrections
+            bias_correction1 = (1 - self.beta1 ** self.steps[i])
+            bias_correction2 = (1 - self.beta2 ** self.steps[i])
+
+            corrected_first_moment = (self.exp_avgs[i] / bias_correction1)
+            corrected_second_moment = (second_moment / bias_correction2)
+
+            # AdamW parameter update
+            param.data = param.data - (self.lr * corrected_first_moment / ( sqrt(corrected_second_moment) + self.eps))

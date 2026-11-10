@@ -876,21 +876,7 @@ class MyCrossEntropyLoss(MyLoss):
 
 @from_scratch("torch.optim.AdamW")
 class MyAdamW(MyOptimizer):
-
-    def __init__(
-        self,
-        params,
-        lr=0.001,
-        betas=(0.9, 0.999),
-        eps=1e-8,
-        weight_decay=0.01,
-        amsgrad=False,
-        maximize=False,
-        foreach=None,
-        capturable=False,
-        differentiable=False,
-        fused=None
-    ):
+    def __init__(self, params, lr=0.001, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, amsgrad=False, maximize=False, foreach=None, capturable=False, differentiable=False, fused=None):
         params = list(params)
 
         defaults = {
@@ -909,16 +895,16 @@ class MyAdamW(MyOptimizer):
         super().__init__(params, defaults)
 
         self.lr = lr
-        self.beta1, self.beta2 = betas
+        self.grad_decay, self.squared_grad_decay = betas
         self.eps = eps
         self.weight_decay = weight_decay
         self.amsgrad = amsgrad
         self.maximize = maximize
 
-        self.steps = [0 for _ in params]
-        self.exp_avgs = [param.data * 0 for param in params]
-        self.exp_avg_sqs = [param.data * 0 for param in params]
-        self.max_exp_avg_sqs = [param.data * 0 for param in params]
+        self.step_counts = [0 for _ in params]
+        self.grad_avgs = [param.data * 0 for param in params]
+        self.squared_grad_avgs = [param.data * 0 for param in params]
+        self.max_squared_grad_avgs = [param.data * 0 for param in params]
 
     def step(self):
         from numpy import maximum, sqrt
@@ -932,34 +918,24 @@ class MyAdamW(MyOptimizer):
             if self.maximize:
                 grad = -grad
 
-            # Decoupled weight decay
             param.data = param.data * (1 - self.lr * self.weight_decay)
-
-            # Increment step count
-            self.steps[i] += 1
-
-            # First moment
-            self.exp_avgs[i] = (self.beta1 * self.exp_avgs[i] + (1 - self.beta1) * grad)
-
-            # Second moment
-            self.exp_avg_sqs[i] = (self.beta2 * self.exp_avg_sqs[i] + (1 - self.beta2) * grad * grad)
+            self.step_counts[i] += 1
+            self.grad_avgs[i] = self.grad_decay * self.grad_avgs[i] + (1 - self.grad_decay) * grad
+            self.squared_grad_avgs[i] = self.squared_grad_decay * self.squared_grad_avgs[i] + (1 - self.squared_grad_decay) * grad * grad
 
             if self.amsgrad:
-                self.max_exp_avg_sqs[i] = maximum(self.max_exp_avg_sqs[i], self.exp_avg_sqs[i])
-                second_moment = (self.max_exp_avg_sqs[i])
+                self.max_squared_grad_avgs[i] = maximum(self.max_squared_grad_avgs[i], self.squared_grad_avgs[i])
+                squared_grad_avg = self.max_squared_grad_avgs[i]
             else:
-                second_moment = self.exp_avg_sqs[i]
+                squared_grad_avg = self.squared_grad_avgs[i]
 
-            # Bias corrections
-            bias_correction1 = (1 - self.beta1 ** self.steps[i])
-            bias_correction2 = (1 - self.beta2 ** self.steps[i])
+            grad_bias_correction = 1 - self.grad_decay ** self.step_counts[i]
+            squared_grad_bias_correction = 1 - self.squared_grad_decay ** self.step_counts[i]
 
-            corrected_first_moment = (self.exp_avgs[i] / bias_correction1)
-            corrected_second_moment = (second_moment / bias_correction2)
+            corrected_grad_avg = self.grad_avgs[i] / grad_bias_correction
+            corrected_squared_grad_avg = squared_grad_avg / squared_grad_bias_correction
 
-            # AdamW parameter update
-            param.data = param.data - (self.lr * corrected_first_moment / ( sqrt(corrected_second_moment) + self.eps))
-
+            param.data = param.data - self.lr * corrected_grad_avg / (sqrt(corrected_squared_grad_avg) + self.eps)
 
 @from_scratch("raschka.gpt.SoftmaxRegression")
 class MySoftmaxRegression(MyModule):
